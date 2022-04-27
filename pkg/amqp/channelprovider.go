@@ -57,7 +57,7 @@ func (c *pooledChannel) AMQPChannel() *amqp.Channel {
 func (c *pooledChannel) openAMQPChannel() error {
 	var err error
 
-	c.amqpChan, err = c.conn.amqpConnection.Channel()
+	c.amqpChan, err = c.conn.Connection().Channel()
 	if err != nil {
 		return fmt.Errorf("create AMQP channel: %w", err)
 	}
@@ -99,7 +99,7 @@ type defaultChannelProvider struct {
 }
 
 func (p *defaultChannelProvider) Channel() (channel, error) {
-	amqpChan, err := p.conn.amqpConnection.Channel()
+	amqpChan, err := p.conn.Connection().Channel()
 	if err != nil {
 		return nil, fmt.Errorf("create AMQP channel: %w", err)
 	}
