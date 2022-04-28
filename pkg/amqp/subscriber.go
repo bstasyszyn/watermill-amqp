@@ -144,25 +144,25 @@ func (s *Subscriber) Subscribe(ctx context.Context, topic string) (<-chan *messa
 			// to avoid race conditions with <-s.connected
 			select {
 			case <-s.closing:
-				s.logger.Debug("Stopping ReconnectLoop (already closing)", logFields)
+				s.logger.Info("Stopping ReconnectLoop (already closing)", logFields)
 				break ReconnectLoop
 			case <-s.closedChan:
-				s.logger.Debug("Stopping ReconnectLoop (subscriber closing)", logFields)
+				s.logger.Info("Stopping ReconnectLoop (subscriber closing)", logFields)
 				break ReconnectLoop
 			default:
 				// not closing yet
 			}
 
 			select {
-			case <-s.connected:
-				s.logger.Debug("Connection established in ReconnectLoop", logFields)
+			case <-s.Connected():
+				s.logger.Info("Connection established in ReconnectLoop", logFields)
 				// runSubscriber blocks until connection fails or Close() is called
 				s.runSubscriber(ctx, out, queueName, exchangeName, logFields)
 			case <-s.closing:
-				s.logger.Debug("Stopping ReconnectLoop (closing)", logFields)
+				s.logger.Info("Stopping ReconnectLoop (closing)", logFields)
 				break ReconnectLoop
 			case <-ctx.Done():
-				s.logger.Debug("Stopping ReconnectLoop (ctx done)", logFields)
+				s.logger.Info("Stopping ReconnectLoop (ctx done)", logFields)
 				break ReconnectLoop
 			}
 
@@ -233,12 +233,17 @@ func (s *Subscriber) runSubscriber(
 		return
 	}
 	defer func() {
+		s.logger.Info("Closing channel ...", logFields)
+
 		if err := channel.Close(); err != nil {
 			s.logger.Error("Failed to close channel", err, logFields)
+		} else {
+			s.logger.Info("... channel closed", logFields)
 		}
 	}()
 
-	notifyCloseChannel := channel.NotifyClose(make(chan *amqp.Error))
+	notifyCloseChannel := channel.NotifyClose(make(chan *amqp.Error, 1))
+	closedConn := s.Connection().NotifyClose(make(chan *amqp.Error, 1))
 
 	sub := subscription{
 		out:                out,
@@ -250,11 +255,14 @@ func (s *Subscriber) runSubscriber(
 		closing:            s.closing,
 		closedChan:         s.closedChan,
 		config:             s.config,
+		closedConn:         closedConn,
 	}
 
 	s.logger.Info("Starting consuming from AMQP channel", logFields)
 
 	sub.ProcessMessages(ctx)
+
+	s.logger.Info("Stopped consuming from AMQP channel", logFields)
 }
 
 func (s *Subscriber) openSubscribeChannel(logFields watermill.LogFields) (*amqp.Channel, error) {
@@ -262,7 +270,7 @@ func (s *Subscriber) openSubscribeChannel(logFields watermill.LogFields) (*amqp.
 		return nil, errors.New("not connected to AMQP")
 	}
 
-	channel, err := s.amqpConnection.Channel()
+	channel, err := s.Connection().Channel()
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot open channel")
 	}
@@ -293,6 +301,7 @@ type subscription struct {
 	closing    chan struct{}
 	closedChan chan struct{}
 	config     Config
+	closedConn chan *amqp.Error
 }
 
 func (s *subscription) ProcessMessages(ctx context.Context) {
@@ -333,8 +342,14 @@ ConsumingLoop:
 		case <-ctx.Done():
 			s.logger.Info("Closing from ctx received", s.logFields)
 			break ConsumingLoop
+			//
+			//case <-s.closedConn:
+			//	s.logger.Info("Connection was closed.", s.logFields)
+			//	break ConsumingLoop
 		}
 	}
+
+	s.logger.Info("*** Exiting ConsumingLoop", s.logFields)
 }
 
 func (s *subscription) createConsumer(queueName string, channel *amqp.Channel) (<-chan amqp.Delivery, error) {

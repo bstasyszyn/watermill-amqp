@@ -17,7 +17,7 @@ type ConnectionWrapper struct {
 	logger watermill.LoggerAdapter
 
 	amqpConnection     *amqp.Connection
-	amqpConnectionLock sync.Mutex
+	amqpConnectionLock sync.RWMutex
 	connected          chan struct{}
 
 	closing chan struct{}
@@ -63,7 +63,7 @@ func (c *ConnectionWrapper) Close() error {
 
 	c.connectionWaitGroup.Wait()
 
-	if err := c.amqpConnection.Close(); err != nil {
+	if err := c.Connection().Close(); err != nil {
 		c.logger.Error("Connection close error", err, nil)
 	}
 
@@ -102,16 +102,22 @@ func (c *ConnectionWrapper) connect() error {
 }
 
 func (c *ConnectionWrapper) Connection() *amqp.Connection {
+	c.amqpConnectionLock.RLock()
+	defer c.amqpConnectionLock.RUnlock()
+
 	return c.amqpConnection
 }
 
 func (c *ConnectionWrapper) Connected() chan struct{} {
+	c.amqpConnectionLock.RLock()
+	defer c.amqpConnectionLock.RUnlock()
+
 	return c.connected
 }
 
 func (c *ConnectionWrapper) IsConnected() bool {
 	select {
-	case <-c.connected:
+	case <-c.Connected():
 		return true
 	default:
 		return false
@@ -124,19 +130,19 @@ func (c *ConnectionWrapper) Closed() bool {
 
 func (c *ConnectionWrapper) handleConnectionClose() {
 	for {
-		c.logger.Debug("handleConnectionClose is waiting for c.connected", nil)
-		<-c.connected
-		c.logger.Debug("handleConnectionClose is for connection or Pub/Sub close", nil)
+		c.logger.Info("handleConnectionClose is waiting for c.connected", nil)
+		<-c.Connected()
+		c.logger.Info("handleConnectionClose is for connection or Pub/Sub close", nil)
 
-		notifyCloseConnection := c.amqpConnection.NotifyClose(make(chan *amqp.Error))
+		notifyCloseConnection := c.Connection().NotifyClose(make(chan *amqp.Error, 1))
 
 		select {
 		case <-c.closing:
-			c.logger.Debug("Stopping handleConnectionClose", nil)
-			c.connected = make(chan struct{})
+			c.logger.Info("Stopping handleConnectionClose", nil)
+			c.setDisconnected()
 			return
 		case err := <-notifyCloseConnection:
-			c.connected = make(chan struct{})
+			c.setDisconnected()
 			c.logger.Error("Received close notification from AMQP, reconnecting", err, nil)
 			c.reconnect()
 		}
@@ -166,4 +172,11 @@ func (c *ConnectionWrapper) reconnect() {
 		// should only exit, if closing Pub/Sub
 		c.logger.Error("AMQP reconnect failed failed", err, nil)
 	}
+}
+
+func (c *ConnectionWrapper) setDisconnected() {
+	c.amqpConnectionLock.Lock()
+	defer c.amqpConnectionLock.Unlock()
+
+	c.connected = make(chan struct{})
 }
